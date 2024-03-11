@@ -1,0 +1,9 @@
+[Unit]
+Description=run sshmon 1 minute after last execution completed
+
+[Timer]
+OnUnitInactiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,114 @@
+#!/usr/bin/env sh
+
+db_file="$1"
+ipinfo_token="$2"
+ipinfo_meta=""
+
+test -z "$db_file" && exit 1
+test "$ipinfo_token" != "" && ipinfo_meta="?token=$ipinfo_token"
+
+print_journal() {
+    since="$1"
+    if [ "$since" != "" ]; then
+        printf 'Querying journalctl since %s\n' "$since" >/dev/stderr
+        journalctl -u sshd --no-pager --output=short-iso --since "$since"
+    else
+        printf 'Querying journalctl from the start\n' >/dev/stderr
+        journalctl -u sshd --no-pager --output=short-iso
+    fi
+}
+
+filter_failed_auth() {
+    grep -E "Failed password|Invalid user|authentication failure|Connection closed by authenticating user|not listed in AllowUsers"
+}
+
+journalctl_line_to_date() {
+    awk '{print $1}' | sed 's/T/ /' | xargs -I {} date -d "{}" "+%Y-%m-%d %H:%M:%S %z"
+}
+
+journalctl_line_to_ip_address() {
+    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'
+}
+
+count_hosts() {
+    ip_address="$1"
+    sqlite3 "$db_file" "SELECT COUNT(*) FROM authlog WHERE ip_address='$ip_address'"
+}
+
+create_host_entry() {
+    ip="$1"
+    lat="$2"
+    lon="$3"
+    country="$4"
+    city="$5"
+    
+    escaped_ip=$(echo "$ip" | sed "s/'/''/g")
+    escaped_country=$(echo "$country" | sed "s/'/''/g")
+    escaped_city=$(echo "$city" | sed "s/'/''/g")
+
+    wait_for_unlock
+    sqlite3 "$db_file" "INSERT INTO authlog (ip_address, latitude, longitude, country, city) VALUES ('$escaped_ip', $lat, $lon, '$escaped_country', '$escaped_city');"
+}
+
+wait_for_unlock() {
+    while true; do
+        if sqlite3 "$db_file" "PRAGMA quick_check;" >/dev/null 2>&1; then
+            break 
+        else
+            echo "Database is locked, waiting..." >&2
+            sleep 0.5
+        fi
+    done
+}
+
+create_connection_entry() {
+    ip_address="$1"
+    date="$2"
+    
+    escaped_ip=$(echo "$ip_address" | sed "s/'/''/g")
+    escaped_date=$(echo "$date" | sed "s/'/''/g")
+
+    wait_for_unlock
+    sqlite3 "$db_file" "INSERT INTO connections (id, ip_address, date) VALUES ('$(uuidgen)', '$escaped_ip', '$escaped_date');"
+}
+
+create_entries_from_auth_attempts() {
+    while IFS= read -r line; do
+        ip="$(echo "$line" | journalctl_line_to_ip_address)"
+        date="$(echo "$line" | journalctl_line_to_date)"
+        if [ "$(count_hosts "$ip")" = "0" ]; then
+            ipinfo="$(curl -s "https://ipinfo.io/$ip$ipinfo_meta")"
+            lat=$(echo "$ipinfo" | jq -r '.loc' | cut -d',' -f1)
+            lon=$(echo "$ipinfo" | jq -r '.loc' | cut -d',' -f2)
+            country="$(echo "$ipinfo" | jq -r '.country')"
+            city="$(echo "$ipinfo" | jq -r '.city')"
+            printf 'Creating authlog entry for %s\n' "$ip"
+            create_host_entry "$ip" "$lat" "$lon" "$country" "$city"
+            sleep 1
+        fi
+        printf 'Creating connection entry for %s at %s\n' "$ip" "$date"
+        create_connection_entry "$ip" "$date"
+    done
+}
+
+test -f "$db_file" || printf '[Info] Database not found. Creating.\n' >/dev/stderr
+
+sqlite3 "$db_file" <<EOSQL
+CREATE TABLE IF NOT EXISTS authlog (
+    ip_address TEXT PRIMARY KEY,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    country TEXT NOT NULL,
+    city TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS connections (
+    id TEXT PRIMARY KEY,
+    ip_address TEXT NOT NULL,
+    date TEXT NOT NULL,
+    FOREIGN KEY (ip_address) REFERENCES authlog(ip_address)
+);
+EOSQL
+
+last_date="$(sqlite3 "$db_file" "SELECT MAX(date) FROM connections")"
+print_journal "$last_date" | filter_failed_auth | create_entries_from_auth_attempts
+printf '[Info] Complete.\n' >/dev/stderr
