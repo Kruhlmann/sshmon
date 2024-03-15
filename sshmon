@@ -10,10 +10,10 @@ test "$ipinfo_token" != "" && ipinfo_meta="?token=$ipinfo_token"
 print_journal() {
     since="$1"
     if [ "$since" != "" ]; then
-        printf 'Querying journalctl since %s\n' "$since" >/dev/stderr
+        printf 'Querying journalctl since %s\n' "$since" 1>&2
         journalctl -u sshd --no-pager --output=short-iso --since "$since"
     else
-        printf 'Querying journalctl from the start\n' >/dev/stderr
+        printf 'Querying journalctl from the start\n' 1>&2
         journalctl -u sshd --no-pager --output=short-iso
     fi
 }
@@ -91,7 +91,7 @@ create_entries_from_auth_attempts() {
     done
 }
 
-test -f "$db_file" || printf '[Info] Database not found. Creating.\n' >/dev/stderr
+test -f "$db_file" || printf '[Info] Database not found. Creating.\n' 1>&2
 
 sqlite3 "$db_file" <<EOSQL
 CREATE TABLE IF NOT EXISTS authlog (
@@ -111,4 +111,4 @@ EOSQL
 
 last_date="$(sqlite3 "$db_file" "SELECT MAX(date) FROM connections")"
 print_journal "$last_date" | filter_failed_auth | create_entries_from_auth_attempts
-printf '[Info] Complete.\n' >/dev/stderr
+printf '[Info] Complete.\n' 1>&2
